@@ -3,6 +3,8 @@ import nltk
 from nltk.corpus import wordnet as wn
 from nltk.corpus import stopwords 
 import numpy as np
+from collections import defaultdict
+from sklearn.neural_network import MLPClassifier
 # nltk.download('stopwords')    # needed to download this one 
 
 def preprocess (dict) : 
@@ -134,7 +136,6 @@ def getGlove (filePath) :
 
     return embeddings
 
-
 def getAvgVector (embeddings, sentence) :
     vectors = []
 
@@ -154,55 +155,70 @@ def getAvgVector (embeddings, sentence) :
     return averageVector
 
 
-def getCosineSim (v1, v2) :
-    if (np.linalg.norm(v1) == 0) or (np.linalg.norm(v2) == 0) :
-        return 0
-
-    cosSim = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-    return cosSim
-
-
-def gloveMethod (dict, filePath) :
+# training the model per lemma
+def trainGloveNN (dict, keyDict, filePath) : 
     embeddings = getGlove(filePath)
     preprocessedDict = preprocess(dict)
 
-    resultsDict = {}
-
+    xDict = defaultdict(list)
+    yDict = defaultdict(list)
+    
     for i in dict : 
-        # getting the average vector of the context sentence
-        curContext = preprocessedDict[i]
         curLemma = dict[i].lemma
         curPOS = convertPOS(dict[i].pos)
-        avgContextVec = getAvgVector(embeddings, curContext)
 
-        # for all the definition sentences
-        synsets = wn.synsets(curLemma, pos=curPOS)
-        bestMatch = None
-        bestSimilitude = -float('inf')
+        # build a context vector by using the GloVe embeddings of the words in the context
+        curContext = preprocessedDict[i]
+        contextVec = getAvgVector(embeddings, curContext)
+        synsetKey = wn.synset_from_sense_key(keyDict[i][0])
 
-        # get the average vector
-        for curSynset in synsets : 
-            #get definition into a vector 
-            curDefinition = curSynset.definition().lower().split()
-            curExamples = curSynset.examples().lower().split()  
-            curDef = curDefinition + curExamples
-
-            avgDef = getAvgVector(embeddings, curDef)
-            curSimilitude = getCosineSim(avgContextVec, avgDef)
-
-            # select the vector that's closest to the context sentence 
-            if (curSimilitude > bestSimilitude) :
-                bestMatch = curSynset
-                bestSimilitude = curSimilitude
+        xDict[(curLemma, curPOS)].append(contextVec)
+        yDict[(curLemma, curPOS)].append(synsetKey.name())
         
-        resultsDict[i] = bestMatch
+    classifiers = {}
+    labelSets = {}
 
-    return resultsDict
+    for lemmaPOS in xDict : 
+        x = np.array(xDict[lemmaPOS])
+        y = yDict[lemmaPOS]
+        
+        uniqueLabels = set(y)
+        classifier = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, random_state=42)
+
+        classifier.fit(x, y) 
+        classifiers[lemmaPOS] = classifier
+        labelSets[lemmaPOS] = list(uniqueLabels)
+
+    return classifiers, labelSets, embeddings 
 
 
-def testGloveMethod (myDict, keyDict) : 
-    myDict = gloveMethod(myDict, '../wiki_giga_2024_50_MFT20_vectors_seed_123_alpha_0.75_eta_0.075_combined.txt')
-    return accuracy(myDict, keyDict)
+
+def predictGloveNN (dict, embeddings, classifiers, labelSets) : 
+    preprocessedDict = preprocess(dict)
+    
+    predictionsDict = {}
+
+    for i in dict : 
+        curLemma = dict[i].lemma
+        curPOS = convertPOS(dict[i].pos)
+        lemmaPOS = (curLemma, curPOS)
+
+        curContext = preprocessedDict[i]
+        contextVec = getAvgVector(embeddings, curContext)
+        contextVec = contextVec.reshape(1, -1)
+
+        synsets = wn.synsets(curLemma, pos=curPOS)
+
+        # if there's a lemma that was not trained on
+        if lemmaPOS not in classifiers:
+            predictionsDict[i] = synsets[0]   # MFS fallback
+            continue
+
+        predictedLabel = classifiers[lemmaPOS].predict(contextVec)[0]
+        predictionsDict[i] = wn.synset(predictedLabel)
+
+    
+    return predictionsDict
 
 
 # 4. xyz
@@ -240,7 +256,8 @@ if __name__ == '__main__':
     print("Accuracy (dev_instances and dev_key) : ", testLesk(dev_instances, dev_key))
     print("Accuracy (test_instances and test_key) : ", testLesk(test_instances, test_key))
 
-    # 3. Pre-trained neural network using GloVe
-    print("3. Pre-trained neural network using GloVe")
-    print("Accuracy (dev_instances and dev_key) : ", testGloveMethod(dev_instances, dev_key))
-    print("Accuracy (test_instances and test_key) : ", testGloveMethod(test_instances, test_key))
+    # 3. Neural network using GloVe
+    print("3. Neural network using GloVe")
+    classifiers, labelSets, embeddings = trainGloveNN(dev_instances, dev_key, "../wiki_giga_2024_50_MFT20_vectors_seed_123_alpha_0.75_eta_0.075_combined.txt")
+    predictions = predictGloveNN(test_instances, embeddings, classifiers, labelSets)
+    print("Accuracy (predictions using test_instances):", accuracy(predictions, test_key))
