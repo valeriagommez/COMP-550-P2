@@ -6,21 +6,45 @@ from nltk.stem import WordNetLemmatizer
 import numpy as np
 from collections import defaultdict
 from sklearn.neural_network import MLPClassifier
-# nltk.download('stopwords')    # needed to download this one 
+# nltk.download('stopwords')    # needed to download this for it to run 
+
+def normalizeLemma(lemma):
+    return lemma.lower().replace(" ", "_")
+
+def mergeMultiWords(tokens):
+    merged = []
+    num = 0
+    while num < len(tokens):
+        if num < len(tokens) - 1:
+            twoWords = tokens[num] + "_" + tokens[num+1]
+            if wn.synsets(twoWords):
+                merged.append(twoWords)
+                num += 2
+                continue
+
+        if num < len(tokens) - 2:
+            threeWords = tokens[num] + "_" + tokens[num+1] + "_" + tokens[num+2]
+            if wn.synsets(threeWords):
+                merged.append(threeWords)
+                num += 3
+                continue
+
+        merged.append(tokens[num])
+        num += 1
+
+    return merged
+
 
 def preprocess (dict) : 
-    # tokenization
-    # lemmatization
-    # multi-word phrases --> put underscores instead of spaces
-    # remove stop words
-
     processedDict = {}
     stop_words = set(stopwords.words('english')) 
     punctuations = [',', '.', '?', '!', ':', '--', '``', '\'\'']
 
-    for i in dict : 
+    for i in dict:
         curSentence = dict[i].context
         processedSent = [word.lower() for word in curSentence if ((word.lower() not in stop_words) and (word.lower() not in punctuations))]
+
+        processedSent = mergeMultiWords(processedSent)
         processedDict[i] = processedSent
           
     return processedDict
@@ -29,10 +53,10 @@ def preprocess (dict) :
 
 # helper function
 def getTopSense (lemma) : 
+    lemma = normalizeLemma(lemma)
     synset = wn.synsets(lemma)
-    if synset : 
+    if synset:
         return synset[0]
-
     return None
 
 # gets the dict with the most frequent sense for each element in the dictionary
@@ -40,7 +64,7 @@ def getMostFrequentSenses (dict) :
     senses = {}
 
     for i in dict : 
-        curLemma = dict[i].lemma
+        curLemma = normalizeLemma(dict[i].lemma)
         curTopSense = getTopSense(curLemma)
         senses[i] = curTopSense
     
@@ -65,7 +89,6 @@ def accuracy (myDict, keyDict) :
             possibleKeys.append(curSynsetKey)
 
         # print(possibleKeys)
-
         for sense in possibleKeys : # scans all possible keys 
             if mySense == sense : 
                 correctCount = correctCount + 1 # adds one to the count if there's a definition that works
@@ -86,7 +109,7 @@ def leskAlgorithm (dict) :
     resultDict = {}
 
     for i in dict : 
-        curLemma = dict[i].lemma
+        curLemma = normalizeLemma(dict[i].lemma)
         sentence = preprocessedDict[i]
         curSynset = nltk.wsd.lesk(sentence, curLemma)
         resultDict[i] = curSynset
@@ -143,10 +166,10 @@ def getAvgVector (embeddings, sentence) :
     for word in sentence : 
         if word in embeddings : 
             vectors.append(embeddings[word])
-            if embeddings[word].shape[0] != 50 : # debugging
-                print("\n") # debugging
-                print(word, " : ", embeddings[word]) # debugging
-                print("Shape: ", embeddings[word].shape) # debugging
+            # if embeddings[word].shape[0] != 50 : # debugging
+                # print("\n") # debugging
+                # print(word, " : ", embeddings[word]) # debugging
+                # print("Shape: ", embeddings[word].shape) # debugging
 
     if not vectors:  # no words found in embeddings
         return np.zeros(50)
@@ -165,7 +188,7 @@ def trainGloveNN (dict, keyDict, filePath) :
     yDict = defaultdict(list)
     
     for i in dict : 
-        curLemma = dict[i].lemma
+        curLemma = normalizeLemma(dict[i].lemma)
         curPOS = convertPOS(dict[i].pos)
 
         # build a context vector by using the GloVe embeddings of the words in the context
@@ -193,14 +216,12 @@ def trainGloveNN (dict, keyDict, filePath) :
     return classifiers, labelSets, embeddings 
 
 
-
 def predictGloveNN (dict, embeddings, classifiers) : 
     preprocessedDict = preprocess(dict)
-    
     predictionsDict = {}
 
     for i in dict : 
-        curLemma = dict[i].lemma
+        curLemma = normalizeLemma(dict[i].lemma)
         curPOS = convertPOS(dict[i].pos)
         lemmaPOS = (curLemma, curPOS)
 
@@ -210,19 +231,18 @@ def predictGloveNN (dict, embeddings, classifiers) :
 
         synsets = wn.synsets(curLemma, pos=curPOS)
 
-        # if there's a lemma that was not trained on
+        # if there's a lemma that was not on the training set
         if lemmaPOS not in classifiers:
-            predictionsDict[i] = synsets[0]   # MFS fallback
+            predictionsDict[i] = synsets[0]   # use the most used sense (MFS)
             continue
 
         predictedLabel = classifiers[lemmaPOS].predict(contextVec)[0]
         predictionsDict[i] = wn.synset(predictedLabel)
 
-    
     return predictionsDict
 
 
-# 4. xyz
+# 4. Word vector + word definition match
 
 def processSynset (synset) :
     lemmatizer = WordNetLemmatizer()
@@ -252,18 +272,15 @@ def trainFourthMethod (dict, keyDict, embeddings) :
     y = []
 
     for i in dict : 
-        curLemma = dict[i].lemma
+        curLemma = normalizeLemma(dict[i].lemma)
         curPOS = convertPOS(dict[i].pos)
-        curTuple = (curLemma, curPOS)
         curContext = preprocessedDict[i]
         contextVect = getAvgVector(embeddings, curContext)
 
-        # correct pairings => label = 1
         correctSynsets = set()
         for senseKey in keyDict[i]:
             correctSynsets.add(wn.synset_from_sense_key(senseKey))
 
-        # incorrect pairings => label = 0
         possibleSynsets = wn.synsets(curLemma, pos=curPOS)
         # print(synsets)
 
@@ -275,8 +292,10 @@ def trainFourthMethod (dict, keyDict, embeddings) :
             x.append(pairFeatures)
 
             if synset in correctSynsets:
+                # correct pairings => label = 1
                 y.append(1)
             else:
+                # incorrect pairings => label = 0
                 y.append(0)
 
     x = np.array(x)
@@ -293,14 +312,13 @@ def predictFourthMethod (embeddings, classifier, dict) :
     predictions = {}
 
     for i in dict : 
-        curLemma = dict[i].lemma
+        curLemma = normalizeLemma(dict[i].lemma)
         curPOS = convertPOS(dict[i].pos)
         curContext = preprocessedDict[i]
         contextVect = getAvgVector(embeddings, curContext)
 
         possibleSynsets = wn.synsets(curLemma, pos=curPOS)
 
-        # bestSynset = possibleSynsets[0]
         bestSynset = None
         bestScore = -float('inf')
 
@@ -320,9 +338,6 @@ def predictFourthMethod (embeddings, classifier, dict) :
     return predictions
 
 
-
-
- 
 if __name__ == '__main__':
     data_f = 'multilingual-all-words.en.xml'
     key_f = 'wordnet.en.key'
@@ -356,8 +371,8 @@ if __name__ == '__main__':
     # 3. Neural network using context vectors and GloVe
     print("3. Neural network using GloVe")
     classifiers, labelSets, embeddings = trainGloveNN(dev_instances, dev_key, "../wiki_giga_2024_50_MFT20_vectors_seed_123_alpha_0.75_eta_0.075_combined.txt")
-    # predictions = predictGloveNN(test_instances, embeddings, classifiers, labelSets)
-    # print("Accuracy (predictions using test_instances):", accuracy(predictions, test_key))
+    predictions = predictGloveNN(test_instances, embeddings, classifiers)
+    print("Accuracy (predictions using test_instances):", accuracy(predictions, test_key))
 
     # 4. Neural network using context and definition matches
     print("4. Neural network using context and definition matches")
