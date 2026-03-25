@@ -2,6 +2,7 @@ import loader
 import nltk
 from nltk.corpus import wordnet as wn
 from nltk.corpus import stopwords 
+from nltk.stem import WordNetLemmatizer
 import numpy as np
 from collections import defaultdict
 from sklearn.neural_network import MLPClassifier
@@ -183,7 +184,7 @@ def trainGloveNN (dict, keyDict, filePath) :
         y = yDict[lemmaPOS]
         
         uniqueLabels = set(y)
-        classifier = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, random_state=42)
+        classifier = MLPClassifier(hidden_layer_sizes=(200,), max_iter=700, random_state=42)
 
         classifier.fit(x, y) 
         classifiers[lemmaPOS] = classifier
@@ -193,7 +194,7 @@ def trainGloveNN (dict, keyDict, filePath) :
 
 
 
-def predictGloveNN (dict, embeddings, classifiers, labelSets) : 
+def predictGloveNN (dict, embeddings, classifiers) : 
     preprocessedDict = preprocess(dict)
     
     predictionsDict = {}
@@ -222,8 +223,104 @@ def predictGloveNN (dict, embeddings, classifiers, labelSets) :
 
 
 # 4. xyz
-def fourthMethod () : 
-    return
+
+def processSynset (synset) :
+    lemmatizer = WordNetLemmatizer()
+    definition = synset.definition()
+    tokens = definition.lower().split()
+    stop_words = set(stopwords.words('english'))
+    punctuations = set([',', '.', '?', '!', ':', ';', '--', '``', '\'\''])
+
+    processedDef = []
+    for word in tokens:
+        if word not in stop_words and word not in punctuations:
+            processedDef.append(lemmatizer.lemmatize(word))
+
+    return processedDef
+
+
+def buildPairFeatures(contextVect, defVect):
+    absDiff = np.abs(contextVect - defVect)
+    prod = contextVect * defVect
+    return np.concatenate([contextVect, defVect, absDiff, prod])
+
+
+def trainFourthMethod (dict, keyDict, embeddings) : 
+    preprocessedDict = preprocess(dict)
+
+    x = []
+    y = []
+
+    for i in dict : 
+        curLemma = dict[i].lemma
+        curPOS = convertPOS(dict[i].pos)
+        curTuple = (curLemma, curPOS)
+        curContext = preprocessedDict[i]
+        contextVect = getAvgVector(embeddings, curContext)
+
+        # correct pairings => label = 1
+        correctSynsets = set()
+        for senseKey in keyDict[i]:
+            correctSynsets.add(wn.synset_from_sense_key(senseKey))
+
+        # incorrect pairings => label = 0
+        possibleSynsets = wn.synsets(curLemma, pos=curPOS)
+        # print(synsets)
+
+        for synset in possibleSynsets:
+            processedDef = processSynset(synset)
+            defVect = getAvgVector(embeddings, processedDef)
+
+            pairFeatures = buildPairFeatures(contextVect, defVect)
+            x.append(pairFeatures)
+
+            if synset in correctSynsets:
+                y.append(1)
+            else:
+                y.append(0)
+
+    x = np.array(x)
+    y = np.array(y)
+
+    classifier = MLPClassifier(hidden_layer_sizes=(300,), max_iter=800, random_state=42)
+    classifier.fit(x, y)
+
+    return classifier
+
+
+def predictFourthMethod (embeddings, classifier, dict) :
+    preprocessedDict = preprocess(dict)
+    predictions = {}
+
+    for i in dict : 
+        curLemma = dict[i].lemma
+        curPOS = convertPOS(dict[i].pos)
+        curContext = preprocessedDict[i]
+        contextVect = getAvgVector(embeddings, curContext)
+
+        possibleSynsets = wn.synsets(curLemma, pos=curPOS)
+
+        # bestSynset = possibleSynsets[0]
+        bestSynset = None
+        bestScore = -float('inf')
+
+        for synset in possibleSynsets:
+            processedDef = processSynset(synset)
+            defVect = getAvgVector(embeddings, processedDef)
+
+            pairFeatures = buildPairFeatures(contextVect, defVect).reshape(1, -1)
+            score = classifier.predict_proba(pairFeatures)[0][1]
+
+            if score > bestScore:
+                bestScore = score
+                bestSynset = synset
+
+        predictions[i] = bestSynset
+
+    return predictions
+
+
+
 
  
 if __name__ == '__main__':
@@ -256,8 +353,14 @@ if __name__ == '__main__':
     print("Accuracy (dev_instances and dev_key) : ", testLesk(dev_instances, dev_key))
     print("Accuracy (test_instances and test_key) : ", testLesk(test_instances, test_key))
 
-    # 3. Neural network using GloVe
+    # 3. Neural network using context vectors and GloVe
     print("3. Neural network using GloVe")
     classifiers, labelSets, embeddings = trainGloveNN(dev_instances, dev_key, "../wiki_giga_2024_50_MFT20_vectors_seed_123_alpha_0.75_eta_0.075_combined.txt")
-    predictions = predictGloveNN(test_instances, embeddings, classifiers, labelSets)
+    # predictions = predictGloveNN(test_instances, embeddings, classifiers, labelSets)
+    # print("Accuracy (predictions using test_instances):", accuracy(predictions, test_key))
+
+    # 4. Neural network using context and definition matches
+    print("4. Neural network using context and definition matches")
+    classifier = trainFourthMethod(dev_instances, dev_key, embeddings)
+    predictions = predictFourthMethod (embeddings, classifier, test_instances)
     print("Accuracy (predictions using test_instances):", accuracy(predictions, test_key))
